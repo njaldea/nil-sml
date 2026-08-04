@@ -2,20 +2,69 @@
 
 #include <nil/xalt/checks.hpp>
 #include <nil/xalt/coalesce.hpp>
+#include <nil/xalt/str_name.hpp>
 #include <nil/xalt/tlist.hpp>
 #include <nil/xalt/typed.hpp>
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <memory>
 #include <queue>
+#include <string_view>
 #include <type_traits>
+#include <utility>
 #include <variant>
 
 namespace nil::sm
 {
+    struct state_metadata final
+    {
+        std::size_t region = 0;
+        std::size_t region_count = 0;
+        std::string_view name;
+        const state_metadata* parent = nullptr;
+    };
+
     namespace detail
     {
+        template <typename T>
+        consteval auto str_short_name_no_template()
+        {
+            constexpr auto name = nil::xalt::str_short_name<T>();
+            constexpr auto name_sv = nil::xalt::literal_sv<name>;
+            constexpr auto lt = name_sv.find('<');
+            if constexpr (lt == std::string_view::npos)
+            {
+                return name;
+            }
+            else
+            {
+                return nil::xalt::substr<name, 0, lt>();
+            }
+        }
+
+        template <typename T>
+        inline constexpr const auto& str_short_name_no_template_v
+            = nil::xalt::literal_v<str_short_name_no_template<T>()>;
+
+        template <typename T>
+        inline constexpr const auto& str_short_name_no_template_sv
+            = nil::xalt::literal_sv<str_short_name_no_template<T>()>;
+
+        template <typename T>
+        inline constexpr std::string_view state_name_sv = []() -> std::string_view
+        {
+            if constexpr (requires() { T::name; })
+            {
+                return T::name;
+            }
+            else
+            {
+                return str_short_name_no_template_sv<T>;
+            }
+        }();
+
         template <typename T>
         void deleter(void* v)
         {
@@ -28,6 +77,8 @@ namespace nil::sm
             return new T(*static_cast<T*>(v)); // NOLINT
         }
 
+        class Queues;
+        struct Contexts;
         struct IState;
 
         struct EvRegionsFinalized final
@@ -38,7 +89,13 @@ namespace nil::sm
 
         struct Transit final
         {
-            std::unique_ptr<IState> (*to)(void*, void*, void*);
+            std::unique_ptr<IState> (*to)(
+                void*,
+                Queues*,
+                Contexts*,
+                std::size_t,
+                const state_metadata* //
+            );
         };
 
         struct Emit final
@@ -52,11 +109,13 @@ namespace nil::sm
 
     struct fin final
     {
+        static constexpr auto name = "[**]";
     };
 
     template <typename... R>
     struct root final
     {
+        static constexpr auto name = "[--]";
         using regions = nil::xalt::tlist<R...>;
     };
 
@@ -247,11 +306,15 @@ namespace nil::sm
             >;
         using on_enter_t = std::variant<NOOP, detail::Emit>;
         using on_exit_t = std::variant<NOOP, detail::Emit>;
-        using on_regions_finalized_t = std::variant<NOOP, detail::Transit, detail::Emit>;
+        using on_regions_finalized_t = std::variant<NOOP, Terminate, detail::Transit, detail::Emit>;
 
         struct IState
         {
-            IState() = default;
+            explicit IState(state_metadata init_metadata)
+                : metadata(init_metadata)
+            {
+            }
+
             IState(IState&&) = delete;
             IState(const IState&) = delete;
             IState& operator=(IState&&) = delete;
@@ -259,6 +322,8 @@ namespace nil::sm
             virtual ~IState() = default;
 
             virtual on_event_t on_event(const detail::Emit& e) = 0;
+
+            const state_metadata metadata;
         };
 
         template <typename S, typename E>
@@ -406,6 +471,7 @@ namespace nil::sm
     public:
         using api_t = API<T>;
         using self_t = State<T, API>;
+        using metadata_t = state_metadata;
 
     private:
         using state_t = typename api_t::state_t;
@@ -414,6 +480,7 @@ namespace nil::sm
         using event_dispatch_t = detail::event_dispatcher<self_t, events_t>;
         using state_context_t = typename api_t::state_context_t;
         using api_context_t = typename api_t::api_context_t;
+        using region_index_t = std::size_t;
 
         struct sub_state_scan_t
         {
@@ -423,34 +490,74 @@ namespace nil::sm
         };
 
         template <typename U>
-        static std::unique_ptr<IState> make_state(void* p, void* q, void* c)
+        static std::unique_ptr<IState> make_state(
+            void* p,
+            detail::Queues* queues,
+            detail::Contexts* contexts,
+            std::size_t region,
+            const state_metadata* parent_metadata
+        )
         {
+            auto parent = static_cast<state_t*>(p);
             return std::make_unique<State<U, API>>(
-                static_cast<state_t*>(p),
-                static_cast<detail::Queues*>(q),
-                static_cast<detail::Contexts*>(c)
+                parent,
+                queues,
+                contexts,
+                region,
+                parent_metadata
             );
+        }
+
+        template <typename... R, std::size_t... I>
+        static std::array<detail::Region, regions_t::size> init_regions_impl(
+            self_t* self,
+            detail::Queues* qs,
+            detail::Contexts* contexts,
+            nil::xalt::tlist<R...> /* regions */,
+            std::index_sequence<I...> /* region indices */
+        )
+        {
+            return std::array<detail::Region, regions_t::size>{detail::Region{
+                make_state<R>(
+                    std::addressof(self->current_state),
+                    qs,
+                    contexts,
+                    I,
+                    std::addressof(self->metadata)
+                ),
+                {},
+                false
+            }...};
         }
 
         template <typename... R>
         static std::array<detail::Region, regions_t::size> init_regions(
-            [[maybe_unused]] self_t* parent,
+            [[maybe_unused]] self_t* self,
             [[maybe_unused]] detail::Queues* qs,
             [[maybe_unused]] detail::Contexts* contexts,
             nil::xalt::tlist<R...> /* regions */
         )
         {
-            auto on_enter_result = parent->on_enter();
+            auto on_enter_result = self->on_enter();
             if (std::holds_alternative<detail::Emit>(on_enter_result))
             {
                 qs->push_emit(std::get<detail::Emit>(on_enter_result));
             }
 
-            return std::array<detail::Region, regions_t::size>{detail::Region{
-                make_state<R>(std::addressof(parent->current_state), qs, contexts),
-                {},
-                false
-            }...};
+            if constexpr (sizeof...(R) > 0)
+            {
+                return init_regions_impl(
+                    self,
+                    qs,
+                    contexts,
+                    nil::xalt::tlist<R...>{},
+                    std::index_sequence_for<R...>{}
+                );
+            }
+            else
+            {
+                return {};
+            }
         }
 
     public:
@@ -458,14 +565,23 @@ namespace nil::sm
         explicit State(
             Parent* init_parent,
             detail::Queues* init_qs,
-            detail::Contexts* init_contexts
+            detail::Contexts* init_contexts,
+            std::size_t init_region,
+            const metadata_t* init_parent_metadata
         )
-            : qs(init_qs)
+            : detail::IState(state_metadata{
+                  .region = init_region,
+                  .region_count = regions_t::size,
+                  .name = detail::state_name_sv<T>,
+                  .parent = init_parent_metadata
+              })
+            , qs(init_qs)
             , contexts(init_contexts)
             , current_state(api_t::make(
                   init_parent,
                   static_cast<state_context_t*>(contexts->state),
-                  static_cast<api_context_t*>(contexts->api)
+                  static_cast<api_context_t*>(contexts->api),
+                  this->metadata
               ))
             , regions(init_regions(this, qs, contexts, regions_t()))
         {
@@ -665,9 +781,10 @@ namespace nil::sm
                     {
                         if constexpr (std::is_same_v<R, detail::Transit>)
                         {
+                            const auto parent = std::addressof(current_state);
                             regions[i].active_state.reset();
                             regions[i].active_state
-                                = r.to(std::addressof(current_state), qs, contexts);
+                                = r.to(parent, qs, contexts, i, std::addressof(this->metadata));
                             // Flush deferred events after state transition
                             flush_deferred(i);
                         }
@@ -677,9 +794,15 @@ namespace nil::sm
                         }
                         else if constexpr (std::is_same_v<R, Terminate>)
                         {
+                            const auto parent = std::addressof(current_state);
                             regions[i].active_state.reset();
-                            regions[i].active_state
-                                = make_state<fin>(std::addressof(current_state), qs, contexts);
+                            regions[i].active_state = make_state<fin>(
+                                parent,
+                                qs,
+                                contexts,
+                                i,
+                                std::addressof(this->metadata)
+                            );
                             regions[i].terminated = true;
                             // Flush deferred events after state termination
                             flush_deferred(i);
@@ -725,7 +848,8 @@ namespace nil::sm
         static state_t make(
             Parent* parent,
             state_context_t* state_contexts,
-            api_context_t* /* api_contexts */
+            api_context_t* /* api_contexts */,
+            state_metadata /* metadata */
         )
         {
             if constexpr (requires() { T(parent, state_contexts); })
@@ -748,7 +872,11 @@ namespace nil::sm
         }
 
         template <typename E>
-        static auto on_event(state_t& state, const E& event, api_context_t* /* api_contexts */)
+        static auto on_event(
+            state_t& state,
+            const E& event,
+            api_context_t* /* api_contexts */
+        )
         {
             if constexpr (concepts::has_on_event<state_t, E>)
             {
@@ -823,16 +951,20 @@ namespace nil::sm
             static state_t make(
                 Parent* parent,
                 state_context_t* state_contexts,
-                api_context_t* api_contexts
+                api_context_t* api_contexts,
+                const state_metadata& metadata
             )
             {
-                if constexpr (requires() { API<T>::make(parent, state_contexts, api_contexts); })
+                static constexpr auto api_has_make
+                    = requires() { API<T>::make(parent, state_contexts, api_contexts, metadata); };
+
+                if constexpr (api_has_make)
                 {
-                    return API<T>::make(parent, state_contexts, api_contexts);
+                    return API<T>::make(parent, state_contexts, api_contexts, metadata);
                 }
                 else
                 {
-                    return defaulter_t::make(parent, state_contexts, api_contexts);
+                    return defaulter_t::make(parent, state_contexts, api_contexts, metadata);
                 }
             }
 
@@ -891,13 +1023,14 @@ namespace nil::sm
     class SM final
     {
         using api_t = API<root<Regions...>>;
+        using regions_t = typename api_t::regions_t;
         using state_context_t = typename api_t::state_context_t;
         using api_context_t = typename api_t::api_context_t;
 
     public:
         explicit SM(state_context_t* state_contexts, api_context_t* api_contexts)
             : contexts({.state = state_contexts, .api = api_contexts})
-            , state(this, &queues, &contexts)
+            , state(this, &queues, &contexts, 0U, nullptr)
         {
         }
 

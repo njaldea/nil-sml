@@ -66,7 +66,8 @@ struct TestAPI<State, nil::xalt::tlist<StateContexts...>>
     static state_t make(
         Parent* parent,
         state_context_t* state_contexts,
-        api_context_t* api_contexts
+        api_context_t* api_contexts,
+        const nil::sm::state_metadata& metadata
     )
     {
         if constexpr (!nil::xalt::is_of_template_v<state_t, nil::sm::root>
@@ -74,7 +75,7 @@ struct TestAPI<State, nil::xalt::tlist<StateContexts...>>
         {
             api_contexts->on_make_called(nil::xalt::type_id<state_t>);
         }
-        return api_t::make(parent, state_contexts, api_contexts);
+        return api_t::make(parent, state_contexts, api_contexts, metadata);
     }
 
     // Lifecycle hooks that receive the mock from APIContexts

@@ -65,7 +65,12 @@ namespace
         using api_context_t = MakeObserver;
 
         template <typename Parent>
-        static T make(Parent* parent, void* state_contexts, MakeObserver* api_contexts)
+        static T make(
+            Parent* parent,
+            void* state_contexts,
+            MakeObserver* api_contexts,
+            const nil::sm::state_metadata& metadata
+        )
         {
             if constexpr (!nil::xalt::is_of_template_v<T, nil::sm::root>
                           && !std::is_same_v<T, nil::sm::fin>)
@@ -73,7 +78,7 @@ namespace
                 api_contexts->on_construct();
             }
             // Delegate construction to default_api
-            return nil::sm::default_api<T>::make(parent, state_contexts, nullptr);
+            return nil::sm::default_api<T>::make(parent, state_contexts, nullptr, metadata);
         }
 
         // on_event, on_enter, on_exit, on_regions_finalized — not defined here
@@ -175,7 +180,12 @@ namespace
         using state_context_t = std::tuple<CtxA*, CtxB*>;
 
         template <typename Parent>
-        static T make(Parent* parent, state_context_t* state_contexts, void* /* api_contexts */)
+        static T make(
+            Parent* parent,
+            state_context_t* state_contexts,
+            void* /* api_contexts */,
+            const nil::sm::state_metadata& /* metadata */
+        )
         {
             if constexpr (!nil::xalt::is_of_template_v<T, nil::sm::root>
                           && !std::is_same_v<T, nil::sm::fin>)

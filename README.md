@@ -143,6 +143,23 @@ nil::sm::SM<MyAPI, MyRegion> sm{nullptr, nullptr};
 
 For states requiring injected context, use `default_api` with a context type — see [State Construction Contexts](#state-construction-contexts).
 
+### API Adapter Contract
+
+Custom API adapters (used via `SM<API, ...>` or `coalesce_api`) follow this hook shape:
+
+- `make(parent, state_contexts, api_contexts, metadata)`
+- `on_event(state, event, api_contexts)`
+- `on_enter(state, api_contexts)`
+- `on_exit(state, api_contexts)`
+- `on_regions_finalized(state, api_contexts)`
+
+Only `make(...)` receives `state_metadata` explicitly.
+
+`state_metadata` currently contains:
+- `region` (`std::size_t`) — region slot index of the state instance
+
+Metadata is stored by the runtime on state instances (via the internal base) and can be surfaced by custom APIs/states when needed.
+
 ---
 
 ### Reaction Types
